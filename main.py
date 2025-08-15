@@ -861,8 +861,9 @@ def execute_api(model, selected_tools, conversation, options = {}):
                     for mes in response.output if mes.type == 'function_call'
                 ]
                 if tool_calls:
-                    args["input"] += tool_calls
-                    args["input"] += handle_tool_calls(tool_calls, "response")
+                    # args["input"] += tool_calls
+                    args["input"] = handle_tool_calls(tool_calls, "response")
+                    args["previous_response_id"] = response.id
                     tool_call_count += 1
 
                 else:
@@ -1150,6 +1151,15 @@ if "conversation" not in st.session_state:
 conversation = st.session_state.conversation 
 
 models = {
+  "GPT-5-response": {
+    "model": "gpt-5",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "streaming": True,
+    "pricing": {"in": 1.25, "cached": 0.125, "out":10} # Azureでのpriceが見つからない。これは、https://learn.microsoft.com/en-us/answers/questions/5521675/what-is-internal-microsoft-pricing-for-using-gpt-5
+  },
   "GPT-4.1-response": {
     "model": "gpt-4.1",
     "client": st.session_state.clients["openai"],
