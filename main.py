@@ -1155,6 +1155,17 @@ if "assistants" not in st.session_state:
     }
 
 models = {
+  "GPT-5-mini-response": {
+    "model": "gpt-5-mini",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "response",
+    "support_vision": True,
+    "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "medium",
+    "streaming": True,
+    "pricing": {"in": 0.25, "cached": 0.025, "out":2} # Azureでのpriceが見つからない。これは、https://learn.microsoft.com/en-us/answers/questions/5521675/what-is-internal-microsoft-pricing-for-using-gpt-5
+  },
   "GPT-5-response": {
     "model": "gpt-5",
     "client": st.session_state.clients["openai"],
@@ -1162,9 +1173,18 @@ models = {
     "support_vision": True,
     "support_tools": True,
     "support_reasoning_effort": True,
-    "default_reasoning_effort": "minimal",
+    "default_reasoning_effort": "medium",
     "streaming": True,
     "pricing": {"in": 1.25, "cached": 0.125, "out":10} # Azureでのpriceが見つからない。これは、https://learn.microsoft.com/en-us/answers/questions/5521675/what-is-internal-microsoft-pricing-for-using-gpt-5
+  },
+  "model-router-completion": {
+    "model": "model-router",
+    "client": st.session_state.clients["openai"],
+    "api_mode": "completion",
+    "support_vision": True,
+    "support_tools": True,
+    "streaming": True,
+    "pricing": {"in": 1.25, "cached": 0.125, "out":10} # これはGPT-5の単価。実際には利用されたモデルの単価で請求される
   },
   "GPT-4.1-response": {
     "model": "gpt-4.1",
