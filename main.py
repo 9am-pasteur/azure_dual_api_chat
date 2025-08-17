@@ -1394,7 +1394,8 @@ with st.sidebar:
 if "conversation" not in st.session_state:
     st.session_state.conversation = ConversationManager(st.session_state.clients, st.session_state.assistants)
     # developerメッセージ追加
-    st.session_state.conversation.add_message(model, "developer", "ユーザーの質問が曖昧な場合は、まず簡潔に一次回答を提示し、必要に応じてより深掘りできる選択肢や、質問の意図を明確にするための追加質問を案内してください。また、ツールの利用回数が7回を超える可能性がある場合は、まず最大4回以内で合理的な回答を試み、その上でさらなるツール利用の計画をユーザーに説明し、実行の同意を確認してください。", [])
+    # Formatting re-enabled: 参考 https://learn.microsoft.com/ja-jp/azure/ai-foundry/openai/how-to/reasoning?tabs=gpt-5%2Cpython-secure%2Cpy#markdown-output
+    st.session_state.conversation.add_message(model, "developer", "Formatting re-enabled - please enclose code blocks with appropriate markdown tags. ユーザーの質問が曖昧な場合は、まず簡潔に一次回答を提示し、必要に応じてより深掘りできる選択肢や、質問の意図を明確にするための追加質問を案内してください。また、ツールの利用回数が7回を超える可能性がある場合は、まず最大4回以内で合理的な回答を試み、その上でさらなるツール利用の計画をユーザーに説明し、実行の同意を確認してください。", [])
 
 conversation = st.session_state.conversation 
 
