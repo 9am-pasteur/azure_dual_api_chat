@@ -830,6 +830,10 @@ def execute_api(model, selected_tools, conversation, options = {}):
         try:
             args = {"model": model["model"], "input": input} | options
 
+            reasoning_effort = args.pop('reasoning_effort', None)
+            if reasoning_effort:
+                args['reasoning'] = {"effort": reasoning_effort}
+
             if response_id:
                 args["previous_response_id"] = response_id
 
@@ -1157,6 +1161,8 @@ models = {
     "api_mode": "response",
     "support_vision": True,
     "support_tools": True,
+    "support_reasoning_effort": True,
+    "default_reasoning_effort": "minimal",
     "streaming": True,
     "pricing": {"in": 1.25, "cached": 0.125, "out":10} # Azureでのpriceが見つからない。これは、https://learn.microsoft.com/en-us/answers/questions/5521675/what-is-internal-microsoft-pricing-for-using-gpt-5
   },
@@ -1314,10 +1320,11 @@ with st.sidebar:
     st.text("Support vision: " + ("True" if model.get("support_vision", False) else "False"))
 
     if model.get("support_reasoning_effort", False):
+        reasoning_effort_choices = ["minimal", "low", "medium", "high"]
         options["reasoning_effort"] = st.selectbox(
             "reasoning_effort",
-            ["low", "medium", "high"],
-            index = 2
+            reasoning_effort_choices,
+            index = ({c: i for i, c in enumerate(reasoning_effort_choices)})[model.get("default_reasoning_effort", "high")]
         )
 
     uploaded_files = None
