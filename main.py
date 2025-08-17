@@ -245,7 +245,7 @@ class ChatThread:
                     "content": self.content_to_content_param(msg.content),
                     "attachments": msg.files
                 }
-                for msg in self.messages
+                for msg in self.messages if msg.role == "user" or msg.role == "assistant"
             ]
         )
         self.thread_id = thread.id
@@ -311,7 +311,7 @@ class ConversationManager:
                 content = self.thread.content_to_content_param(content)
 
             messages.append({
-                "role": "assistant" if msg.role == "assistant" else "user",
+                "role": "assistant" if msg.role == "assistant" else "system" if msg.role == "system" else "system" if msg.role == "developer" else "user",
                 "content": content
             })
         return messages
@@ -365,7 +365,7 @@ class ConversationManager:
                 for file in msg.files]
 
             messages.append({
-                "role": "assistant" if msg.role == "assistant" else "user",
+                "role": "assistant" if msg.role == "assistant" else "system" if msg.role == "system" else "developer" if msg.role == "developer" else "user",
                 "content": content
             })
         return messages, self.response_id
@@ -419,6 +419,8 @@ def pretty_print(messages: List[ChatMessage]) -> None:
     for i0, m0 in enumerate(messages):
 #        print("role:", m.role)
 #        print("content:", m.content)
+        if m0.role == "developer":
+            continue
         if i != -1:
             with st.chat_message("assistant" if m.role == "assistant" else "user"):
                 pretty_print_message(i, m)
@@ -1146,10 +1148,6 @@ if "assistants" not in st.session_state:
         "gpt-4o": get_assistant(st.session_state.clients["openai"], os.getenv("IASA_DEPLOYMENT_MODE", "development"))
     }
 
-if "conversation" not in st.session_state:
-    st.session_state.conversation = ConversationManager(st.session_state.clients, st.session_state.assistants)
-conversation = st.session_state.conversation 
-
 models = {
   "GPT-5-response": {
     "model": "gpt-5",
@@ -1390,6 +1388,13 @@ with st.sidebar:
         ]
     else:
         selected_tools = []
+
+if "conversation" not in st.session_state:
+    st.session_state.conversation = ConversationManager(st.session_state.clients, st.session_state.assistants)
+    # developerメッセージ追加
+    st.session_state.conversation.add_message(model, "developer", "ユーザーの質問が曖昧な場合は、まず簡潔に一次回答を提示し、必要に応じてより深掘りできる選択肢や、質問の意図を明確にするための追加質問を案内してください。また、ツールの利用回数が7回を超える可能性がある場合は、まず最大4回以内で合理的な回答を試み、その上でさらなるツール利用の計画をユーザーに説明し、実行の同意を確認してください。", [])
+
+conversation = st.session_state.conversation 
 
 if content := st.chat_input("メッセージを入力"):
         # ファイル処理
