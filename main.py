@@ -14,6 +14,7 @@ import base64
 import re
 from functools import reduce
 from mimetypes import guess_type
+import httpx
 from openai import AssistantEventHandler, AzureOpenAI
 from azure.ai.inference import ChatCompletionsClient
 from azure.core.credentials import AzureKeyCredential
@@ -1131,7 +1132,8 @@ if "clients" not in st.session_state:
         "openai": AzureOpenAI(
             azure_endpoint = os.getenv("ENDPOINT_URL"),
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version="2025-03-01-preview"
+            api_version="2025-03-01-preview",
+            timeout=httpx.Timeout(1200.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
         "deepseek": ChatCompletionsClient(
             endpoint=os.getenv("DEEPSEEK_ENDPOINT_URL"),
