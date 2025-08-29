@@ -5,6 +5,7 @@ from io import BytesIO
 import socket
 import traceback
 import streamlit as st
+import streamlit.components.v1 as components
 import openai
 import time
 from datetime import datetime, timezone
@@ -1389,6 +1390,78 @@ def get_assistant(client, mode):
 
     return assistant.id
 
+def login_state_extender(email):
+    # email を JS に埋め込む（必ず JSON エスケープ）
+    email_js = json.dumps(email or "")
+
+    html = f"""
+<div id="keepalive-status" style="font-size:0.9rem;color:gray">keepalive status: init</div>
+<script>
+(function() {{
+  const SAVED_EMAIL = {email_js};
+  const INTERVAL_MS = 60 * 1000; // 60秒
+  function log(...args) {{
+    console.log('[keepalive]', ...args);
+    const el = document.getElementById('keepalive-status');
+    if (el) el.textContent = '[keepalive] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ');
+  }}
+
+  // SAVED_EMAIL が空ならここで完全に停止
+  if (!SAVED_EMAIL) {{
+    log('disabled. email is empty (e.g. local mode).');
+    return;
+  }}
+
+  async function keepalive() {{
+    log('keepalive: fetching /.auth/me (to refresh token if applicable)');
+    try {{
+      const resp = await fetch('/.auth/me', {{ method: 'GET', credentials: 'include', cache: 'no-store' }});
+      log('keepalive: /.auth/me status', resp.status);
+      if (resp.ok) {{
+        try {{
+          const j = await resp.json();
+          log('keepalive: /.auth/me json', j);
+        }} catch (e) {{
+          log('keepalive: /.auth/me json parse error', e);
+        }}
+      }}
+    }} catch (e) {{
+      log('keepalive: fetch error', e);
+    }}
+  }}
+
+  function interactiveLoginWithHint(email) {{
+    log('interactiveLoginWithHint, email=', email);
+    const redirect = encodeURIComponent(window.location.pathname || '/');
+    const url = '/.auth/login/google?post_login_redirect_uri=' + redirect
+                + (email ? '&login_hint=' + encodeURIComponent(email) : '');
+    window.location.href = url;
+  }}
+
+  // 初回実行
+  (async function init() {{
+    log('init: SAVED_EMAIL=', SAVED_EMAIL);
+    // 最初の keepalive 実行
+    await keepalive();
+    // 定期実行
+    setInterval(keepalive, INTERVAL_MS);
+
+    // タブ復帰時に即実行
+    document.addEventListener('visibilitychange', function() {{
+      log('visibilitychange, hidden=', document.hidden);
+      if (!document.hidden) {{
+        keepalive();
+      }}
+    }});
+
+    log('init done. To force interactive login from console, call interactiveLoginWithHint(SAVED_EMAIL).');
+  }})();
+}})();
+</script>
+"""
+
+    components.html(html, height=80)  # height 0 で見た目に影響させない
+
 # 初期化
 if "db" not in st.session_state:
     st.session_state.db = CosmosDB(
@@ -1702,6 +1775,8 @@ with st.sidebar:
             value=False,
             key="show_code_and_logs"
         )
+
+    login_state_extender(email)
 
 if "conversation" not in st.session_state:
     st.session_state.conversation = ConversationManager(st.session_state.clients, st.session_state.assistants)
