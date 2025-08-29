@@ -12,15 +12,17 @@ import json
 import time
 import base64
 import re
+import copy
 from functools import reduce
 from mimetypes import guess_type
 import httpx
-from openai import AssistantEventHandler, AzureOpenAI
+from openai import AssistantEventHandler, AzureOpenAI, OpenAI
 from azure.ai.inference import ChatCompletionsClient
 from azure.core.credentials import AzureKeyCredential
 from typing_extensions import override
 from dataclasses import dataclass, field
-from typing import Any, List, Dict, Optional, Union
+from typing import Any, List, Tuple, Dict, Optional, Union
+from openai.types.file_object import FileObject
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionMessage,
@@ -34,12 +36,14 @@ from openai.types.beta.threads import (
     ImageURL,
     Text,
     Annotation,
+    FileCitationAnnotation,
     Run
 )
 from openai.types.responses import (
     Response,
     ResponseUsage,
-    ResponseFunctionToolCall
+    ResponseFunctionToolCall,
+    ResponseCodeInterpreterToolCall
 )
 from azure.ai.inference.models._models import (
     CompletionsUsage
@@ -50,6 +54,8 @@ import serperTools
 import internetAccess
 import processPDF
 from cosmos_nosql import CosmosDB
+
+ContentBlock = ImageFileContentBlock | ImageURLContentBlock | TextContentBlock | ResponseCodeInterpreterToolCall
 
 def get_sub_claim_or_ip():
     """
@@ -188,7 +194,7 @@ class StreamHandler(AssistantEventHandler):
 class ChatMessage:
     role: str
     # contentはAssistant APIのcontent定義を借用
-    content: List[Union[ImageFileContentBlock, ImageURLContentBlock, TextContentBlock]]
+    content: List[ContentBlock]
     files: List[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
@@ -254,7 +260,7 @@ class ChatThread:
         return self.thread_id
 
     @staticmethod
-    def content_to_content_param(content: List[Union[ImageFileContentBlock, ImageURLContentBlock, TextContentBlock]]) -> List[dict]:
+    def content_to_content_param(content: List[ContentBlock]) -> List[dict]:
         """
         オブジェクト形式のcontentを、API送信用にdictに変換する
         """
@@ -276,6 +282,13 @@ class ChatThread:
                     "type": block.type,
                     "image_url": {"url": block.image_url.url, "detail": block.image_url.detail},
                 })
+            elif block.type == "code_interpreter_call":
+                content_param.append({
+                    "type": block.type,
+                    "id": block.id,
+                    "container_id": block.container_id,
+                    "code": block.code
+                })
             else:
                 raise ValueError(f"未知のコンテンツブロックの type: {block.type}")
         return content_param
@@ -287,7 +300,8 @@ class ConversationManager:
         self.thread = ChatThread(self.client)
         self.assistants = assistants
         self.response_id = None
-        self.response_last_message_id = -1;
+        self.response_last_message_id = -1
+        self.code_interpreter_file_ids = []
 
     def add_message(self, model, role, content, files=None, metadata={}):
         """メッセージをChatThreadに追加"""
@@ -297,8 +311,8 @@ class ConversationManager:
         """Completion API用にメッセージを変換"""
         messages = []
         for msg in self.thread.messages:
-            # Assistant API用のImageFileContentBlockは除く
-            content = [cont for cont in msg.content if not isinstance(cont, ImageFileContentBlock)]
+            # Assistant API用のImageFileContentBlock, Response APIのResponseCodeInterpreterToolCallは除く
+            content = [cont for cont in msg.content if not isinstance(cont, (ImageFileContentBlock, ResponseCodeInterpreterToolCall))]
 
             # Visionサポートの無いモデルにImageを与えるとエラーになるので除く
             if not model.get("support_vision", False):
@@ -322,12 +336,32 @@ class ConversationManager:
         self.response_id = response_id
         self.response_last_message_id = self.thread.get_last_message_id()
 
-    def get_response_history(self, model):
-        """Response API用にメッセージを変換"""
+    # 一旦code_interpreterに与えたファイルは以降も利用できるようにする
+    def add_code_interpreter_file_ids(self, file_ids):
+        self.code_interpreter_file_ids += file_ids
+        # uniq
+        self.code_interpreter_file_ids = list(dict.fromkeys(self.code_interpreter_file_ids))
+        return self.code_interpreter_file_ids
+
+    def get_response_history(self, model, offset = 0):
+        """
+        Response API用にメッセージを変換
+        通常は前回応答の次から。reasoning without問題対応用に、offset=-2でその前の1ターン前に遡れるように
+        """
+
+        def is_file_for(what_for, file):
+            for t in file["tools"]:
+                if t["type"] == what_for:
+                    return True
+            return False
+
         messages = []
-        for msg in self.thread.get_messages_after(self.response_last_message_id):
-            # Assistant API用のImageFileContentBlockは除く
-            content = [cont for cont in msg.content if not isinstance(cont, ImageFileContentBlock)]
+        for msg in self.thread.get_messages_after(self.response_last_message_id + offset):
+            content = msg.content
+            if msg.role == "assistant":
+                # Assistant API用のImageFileContentBlockは除く。ResponseOutputMessageParamにはimageを添付できない。
+                # 隣接するoutput_textのannotationとして添付する方法があり得るが未実装
+                content = [cont for cont in msg.content if not isinstance(cont, ImageFileContentBlock)]
 
             # Visionサポートの無いモデルにImageを与えるとエラーになるので除く
             if not model.get("support_vision", False):
@@ -357,19 +391,30 @@ class ConversationManager:
             for cont in content]
 
             # filesをinput_fileとして連結
+            # Response APIでは、Vision対応モデルで、pdfを"input_file"として質問に付加できる。
+            # テキスト及び各ページの画像がモデルに与えられる。
+            # file["tools"]がtype == "file_search"を含む場合、そのファイルをinput_fileとして扱う
+            # 正確には、これはvector検索を用いるいわゆる"file_search"とは異なる機能
+            # type == "code_interpreter"のファイルは別途code_interpreter toolのオプションに添付される
             if msg.files:
                 content += [
                     {
                         "file_id": file["file_id"],
                         "type": "input_file"
                     }
-                for file in msg.files]
+                for file in msg.files if is_file_for("file_search", file)]
 
             messages.append({
                 "role": "assistant" if msg.role == "assistant" else "system" if msg.role == "system" else "developer" if msg.role == "developer" else "user",
                 "content": content
             })
-        return messages, self.response_id
+
+            file_ids_for_code_interpreter = [
+                file["file_id"]
+                for file in msg.files if is_file_for("code_interpreter", file)
+            ] if msg.files else []
+            file_ids_for_code_interpreter = self.add_code_interpreter_file_ids(file_ids_for_code_interpreter)
+        return messages, self.response_id, file_ids_for_code_interpreter
 
     def create_attachments(self, files, tool_for_files):
         """Assistant, Response API用のファイルアップロード"""
@@ -380,10 +425,10 @@ class ConversationManager:
                 file=file,
                 # Response APIのためにはpurpose="user_data"が望ましいが、2025/5/11現在未対応 'Invalid value for purpose.'
                 # "assistants"のままだとResponse APIで、'APIError: An error occurred while processing the request.'
-                # 結局Response APIのinput_fileとしては使えない
+                # 結局Response APIのinput_fileとしては使えない → 2025/8時点では"input_file"として使えている。
                 purpose="assistants"
             )
-            # Response APIではtool_for_filesは無視する想定
+            # Response APIでは"file_search"はメッセージのinput_fileに、"code_interpreter"はcode_intepreter toolのオプションとして添付する
             attachments.append(
                     {
                         "file_id": response.id,
@@ -413,6 +458,117 @@ class ConversationManager:
 #            type="image_file",
 #            image_file=ImageFile(file_id=response.id, detail=detail_level)
 #        )
+
+def convert_parsed_response_to_assistant_messages(outputs: List[Any]) -> Tuple[List[ContentBlock], List[Dict[str, Any]]]:
+    """
+    Transform a Response API parsed_response.output list into a list of Assistant API style content blocks.
+
+    """
+
+    blocks: List[ContentBlock] = []
+    metadata: List[Dict[str, Any]] = []
+
+    def make_text_block(text: str, annotations: List[Any]) -> TextContentBlock:
+        annotations = [
+            FileCitationAnnotation(
+                type="file_citation",
+                text=ann.filename,
+                start_index=ann.start_index,
+                end_index=ann.end_index,
+                file_citation={"file_id": f"{ann.file_id}|{ann.container_id}"}
+            ) if ann.type == "container_file_citation" else ann
+            for ann in annotations
+        ]
+        return TextContentBlock(type="text", text=Text(value=text, annotations=annotations))
+
+    def make_image_url_block(url: str) -> ImageURLContentBlock:
+        return ImageURLContentBlock(type="image_url", image_url=ImageURL(url=url, detail="auto"))
+
+    def make_image_file_block(file_id: str, container_id: str|None = None) -> ImageFileContentBlock:
+        return ImageFileContentBlock(type="image_file", image_file=ImageFile(file_id=f"{file_id}|{container_id}" if container_id else file_id, detail="auto"))
+
+    def extract_annotations(text_value: str, raw_annotations: List[Any]) -> Tuple[List[ContentBlock], List[Dict[str, Any]]]:
+        """
+        Extract image-related annotations from a output_text of Response API response object and transform into Assistant API like image content block.
+        Returns list of image/text blocks and metadata.
+        """
+        indexed_annotations = [ann for ann in raw_annotations if hasattr(ann, "start_index")]
+        other_annotations = [ann for ann in raw_annotations if not hasattr(ann, "start_index")]
+        pending_indexed =[]
+        blocks = []
+        metadata = []
+        offset = 0
+        for ann in sorted(indexed_annotations, key=lambda ann: ann.start_index):
+            atype = getattr(ann, "type", None)
+            start_index = int(getattr(ann, "start_index", 0)) - offset
+            end_index = int(getattr(ann, "end_index", 0)) - offset
+
+            # Clip to [0, len(text_value)]
+            start_index = max(0, start_index)
+            end_index = max(0, min(end_index, len(text_value)))
+
+            pre_text = text_value[:start_index]
+            ann_text = text_value[start_index:end_index]
+            post_text = text_value[end_index:]
+
+            if atype == "container_file_citation":
+                container_id = getattr(ann, "container_id", None)
+                file_id = getattr(ann, "file_id", None)
+                filename = getattr(ann, "filename", "")
+                if filename.lower().endswith(('.png', '.jpg', ".jpeg", ".gif", ".webp")):
+                    if pending_indexed or pre_text:
+                        blocks.append(make_text_block(pre_text, pending_indexed))
+                        pending_indexed = []
+                    blocks.append(make_image_file_block(file_id, container_id))
+                    metadata.append({"filename": filename, "text":ann_text, "raw": ann})
+                    offset += end_index
+                    text_value = post_text
+                    continue
+
+            elif atype == "url_citation":
+                url = getattr(ann, "url", None)
+                title = getattr(ann, "title", None)
+                if re.match(r'^data:', url):
+                    if pending_indexed or pre_text:
+                        blocks.append(make_text_block(pre_text, pending_indexed))
+                        pending_indexed = []
+                    blocks.append(make_image_url_block(url))
+                    metadata.append({"title": title, "text":ann_text, "raw": ann})
+                    offset += end_index
+                    text_value = post_text
+                    continue
+            else:
+                # ignore other annotation types
+                pass
+
+            ann_copy = copy.copy(ann)
+            ann_copy.start_index = start_index
+            ann_copy.end_index = end_index
+            pending_indexed.append(ann_copy)
+
+        blocks.append(make_text_block(text_value, pending_indexed + other_annotations))
+
+        return blocks, metadata
+
+    # Process outputs list in order
+    for out_item in outputs:
+        typ = getattr(out_item, "type", None)
+        if typ == "message":
+            content_items = getattr(out_item, "content", None) or []
+            for content_item in content_items:
+                ctype = getattr(content_item, "type", None)
+                if ctype == "output_text":
+                    text_value = getattr(content_item, "text", "") or ""
+                    raw_annotations = getattr(content_item, "annotations", None) or []
+                    eblocks, emetadata = extract_annotations(text_value, raw_annotations)
+                    blocks += eblocks
+                    metadata += emetadata
+
+        elif typ == "code_interpreter_call":
+            blocks.append(out_item)
+            metadata.append({})
+
+    return blocks, metadata
 
 def pretty_print(messages: List[ChatMessage]) -> None:
     i = -1
@@ -445,6 +601,42 @@ def pretty_print_message(key, message, with_token_summary=False):
             value, files = parse_annotations(cont.text.value, cont.text.annotations)
             st.markdown(value, unsafe_allow_html=True)
             put_buttons(files, f"hist{key}-{j}")
+
+    for j, cont in enumerate(message.content):
+        if isinstance(cont, ResponseCodeInterpreterToolCall):
+            container_id = getattr(cont, "container_id", None)
+            outputs_attr = getattr(cont, "outputs", None) or []
+            key_index = 1
+            for out in outputs_attr:
+                ctype = getattr(out, "type", None)
+                if ctype == "image":
+                    url = getattr(out, "url", None)
+                    if url and url.startswith("data:"):
+                        header, b64 = url.split(",", 1)
+                        # MIMEタイプを取得（例: image/png）
+                        mime = header.split(":")[1].split(";")[0] if ":" in header else "application/octet-stream"
+                        data_bytes = base64.b64decode(b64)
+
+                        # ダウンロードボタン（ファイル名と MIME を指定）
+                        st.download_button(
+                            label="画像をダウンロード",
+                            data=data_bytes,
+                            file_name="image.png",
+                            mime=mime,
+                            key=f"download_buttun_{key}_{j}_{key_index}"
+                        )
+
+                if ctype == "logs" and st.session_state.show_code_and_logs:
+                    with st.expander("code_interpreter logs"):
+                        st.code(out.logs)
+
+                key_index += 1
+
+            code = getattr(cont, "code", None) or ""
+            if code and st.session_state.show_code_and_logs:
+                with st.expander("code_interpreter code"):
+                    st.code(code)
+
 #    print(message)
 #    print(with_token_summary)
     if "file_search_results" in message.metadata:
@@ -458,7 +650,8 @@ def put_buttons(files, key=None) -> None:
             key=f"{key}-{i}"
         else:
             key = None
-        if file["type"] == "file_path":
+        if file["type"] in ("file_path", "file_citation") :
+            # Assistant APIでは"file_path"だけで足りた模様
             st.download_button(
                 f"{file["index"]}: {file["filename"]} : ダウンロード",
                 get_file(file["file_id"]),
@@ -490,8 +683,14 @@ def get_file(file_id: str) -> bytes:
     if key in st.session_state.fileCache:
         return st.session_state.fileCache[key]
 
-    client = st.session_state.clients["openai"]
-    retrieve_file = client.files.with_raw_response.content(file_id)
+    client = st.session_state.clients["openaiv1"]
+    if m := re.match(r'^([^|]*)\|([^|]*)$', file_id):
+        # ファイルがコンテナにある場合
+        file_id = m.group(1)
+        container_id = m.group(2)
+        retrieve_file = client.containers.files.content.retrieve(file_id=file_id, container_id=container_id)
+    else:
+        retrieve_file = client.files.with_raw_response.content(file_id)
     content: bytes = retrieve_file.content
     st.session_state.fileCache[key] = content
     return content
@@ -501,8 +700,15 @@ def get_file_info(file_id: str) -> bytes:
     if key in st.session_state.fileCache:
         return st.session_state.fileCache[key]
 
-    client = st.session_state.clients["openai"]
-    retrieve_file = client.files.retrieve(file_id)
+    client = st.session_state.clients["openaiv1"]
+    if m := re.match(r'^([^|]*)\|([^|]*)$', file_id):
+        # ファイルがコンテナにある場合
+        file_id = m.group(1)
+        container_id = m.group(2)
+        res = client.containers.files.retrieve(file_id=file_id, container_id=container_id)
+        retrieve_file = FileObject(object="file", id=res.id, bytes=res.bytes, created_at=res.created_at, filename=res.path, purpose="assistants", status="processed")
+    else:
+        retrieve_file = client.files.retrieve(file_id)
     st.session_state.fileCache[key] = retrieve_file
     return retrieve_file
 
@@ -526,12 +732,17 @@ def parse_annotations(value: str, annotations: List[Annotation]):
                 }
             )
         elif annotation.type == "file_citation":
-            info = get_file_info(annotation.file_citation.file_id)
+            if '|' in annotation.file_citation.file_id:
+                # Response APIのContainerFileCitation由来の場合
+                filename = annotation.text
+            else:
+                filename = get_file_info(annotation.file_citation.file_id).filename
+
             files.append(
                 {
                     "type": annotation.type,
                     "file_id": annotation.file_citation.file_id,
-                    "filename": info.filename,
+                    "filename": filename,
                     "text": annotation.text,
                     "index": index
                 }
@@ -826,9 +1037,9 @@ def execute_api(model, selected_tools, conversation, options = {}):
         # ======== 2025/5/6 現時点でも、web_search_preview, image_url pointing to an internet address等が実装されていない =======
         # https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/responses?tabs=python-secure
 
-        input, response_id = conversation.get_response_history(model)
+        input, response_id, file_ids_for_code_interpreter = conversation.get_response_history(model)
         try:
-            args = {"model": model["model"], "input": input} | options
+            args = {"model": model["model"], "input": input, "include": ["code_interpreter_call.outputs"]} | options
 
             reasoning_effort = args.pop('reasoning_effort', None)
             if reasoning_effort:
@@ -838,28 +1049,64 @@ def execute_api(model, selected_tools, conversation, options = {}):
                 args["previous_response_id"] = response_id
 
             if model["support_tools"] and selected_tools:
-                args["tools"] = prepare_tools_for_response_api(selected_tools)
+                args["tools"] = prepare_tools_for_response_api(selected_tools, file_ids_for_code_interpreter)
 
+            contents = []
+            annotation_metadata = []
             full_response = ""
             tool_call_count = 0
             while True:
                 print(f"args: {args}")
 
-                if model["streaming"]:
-                    # ストリーミング対応のResponse API実行
-                    with client.responses.stream(**args) as stream:
-                        digester = response_streaming_digester(stream)
-                        full_response += st.write_stream(digester.generator)
-                        stream.until_done()
-                    response = digester.response
+                try:
+                    if model["streaming"]:
+                        # ストリーミング対応のResponse API実行
+                        with client.responses.stream(**args) as stream:
+                            digester = response_streaming_digester(stream)
+                            full_response += st.write_stream(digester.generator)
+                            stream.until_done()
+                        response = digester.response
 
-                else:
-                    # 非ストリーミング対応のResponse API実行
-                    response = client.responses.create(**args)
-                    st.write(response.output_text)
-                    full_response += response.output_text
+                    else:
+                        # 非ストリーミング対応のResponse API実行
+                        response = client.responses.create(**args)
+                        st.write(response.output_text)
+                        full_response += response.output_text
+
+                except Exception as e:
+                    print(e)
+                    # reasoning without問題に対する再試行処理。APIが改善されれば不要になるはず
+                    if (m := re.search(r"'(rs_[0-9a-f]+)' of type 'reasoning' was provided without its required following item\.", str(e))) and args["previous_response_id"]:
+                        print("===== BadRequestError: 'reasoning' was provided without its required following...")
+                        print("===== This may be a bug in API side.")
+                        print(f"===== Retrying after removing the invalid reasoning item.")
+                        failed_reasoning_id = m.group(1)
+                        # 一つ前のユーザー入力に遡って取り出す
+                        input_after_prev_user_input, response_id, file_ids_for_code_interpreter = conversation.get_response_history(model, -2)
+                        # 一つ前のユーザー入力
+                        prev_in_and_out = [input_after_prev_user_input[0]]
+                        # 一つ前の応答はサーバーから取り出す
+                        prev_response = client.responses.retrieve(args["previous_response_id"])
+                        # 問題のreasoning itemを取り除く。message以外のitemはitem_referenceにする
+                        prev_in_and_out += [
+                            out if out.type == "message" else {"type": "item_reference", "id": out.id}
+                            for out in prev_response.output
+                            if out.id != failed_reasoning_id
+                        ]
+                        # ユーザー入力の前に、その前の1ターン分のやり取りを挿入
+                        args["input"] = prev_in_and_out + args["input"]
+                        print(args["input"])
+                        # previous_response_idには前の前のidをセットする
+                        args["previous_response_id"] = prev_response.previous_response_id
+                        continue
+
+                    raise
 
                 print(response)
+
+                eblocks, emetadata = convert_parsed_response_to_assistant_messages(response.output)
+                contents += eblocks
+                annotation_metadata += emetadata
 
                 # streaming時に得られるParsedResponseFunctionToolCallをResponseFunctionToolCallにcastする
                 # 余計なプロパティparsed_argumentsがあるとエラーが出るので
@@ -881,9 +1128,10 @@ def execute_api(model, selected_tools, conversation, options = {}):
 
             token_usage = get_token_usage(response, model)
             st.markdown(format_token_summary(token_usage))
-            metadata = {"token_usage": token_usage}
-            conversation.add_message(model, "assistant", full_response, None, metadata)
+            metadata = {"token_usage": token_usage, "annotations_metadata": annotation_metadata}
+            conversation.add_message(model, "assistant", contents, None, metadata)
             conversation.set_response_id(response.id)
+            st.session_state.need_rerun = True
             return full_response, metadata
 
         except Exception as e:
@@ -948,9 +1196,28 @@ def execute_api(model, selected_tools, conversation, options = {}):
             raise
 
 # Response APIのfunction定義はそれ以前と異なり、"function"プロパティ下にあった定義が、rootに移動しているので変換する
-def prepare_tools_for_response_api(tools):
-    tools = [({"type": "function"} | t["function"]) if t["type"] == "function" else t for t in tools]
-    return tools
+def prepare_tools_for_response_api(tools, file_ids_for_code_interpreter):
+    new_tools = []
+
+    for t in tools:
+        t_type = t.get("type")
+
+        if t_type == "function":
+            new_tools.append(t.get("function", {}) | {"type": "function"})
+
+        elif t_type == "code_interpreter":
+            new_tools.append({
+                "type": "code_interpreter",
+                # Azureドキュメントでは"files"のはずなのだが、"Unknown parameter: 'tools[0].container.files'."
+                # となってしまう。"file_ids"ならば動作する。2025/8
+                "container": {"type": "auto", "file_ids": file_ids_for_code_interpreter}
+#                "container": {"type": "auto", "files": file_ids_for_code_interpreter}
+            })
+
+        else:
+            new_tools.append(t)
+
+    return new_tools
 
 def get_file_search_results(thread_id, run_id):
     client = st.session_state.clients["openai"]
@@ -1130,14 +1397,22 @@ if "db" not in st.session_state:
         'ToDoList',
         'Items'
     )
-
 if "clients" not in st.session_state:
     st.session_state.clients = {
+        # 2025/8時点ではcontainer fileに非対応
         "openai": AzureOpenAI(
             azure_endpoint = os.getenv("ENDPOINT_URL"),
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version="2025-03-01-preview",
+            api_version="2025-04-01-preview",
             timeout=httpx.Timeout(1200.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
+        ),
+        # v1 preview
+        # 2025/8時点ではAssistant APIに非対応
+        "openaiv1": OpenAI(
+            base_url = os.getenv("ENDPOINT_URL").rstrip("/") + "/openai/v1/",
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            default_query={"api-version": "preview"},
+            timeout=httpx.Timeout(1199.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
         "deepseek": ChatCompletionsClient(
             endpoint=os.getenv("DEEPSEEK_ENDPOINT_URL"),
@@ -1315,6 +1590,8 @@ if 'switches' not in st.session_state:
         "parse_html_content": True,
         "extract_pdf_content": True
     }
+if "need_rerun" not in st.session_state:
+    st.session_state.need_rerun = False
 
 # メインUI
 st.subheader("IASA Chat Interface")
@@ -1355,7 +1632,7 @@ with st.sidebar:
             accept_multiple_files=True,
             key = f"file_uploader_{st.session_state.uploader_key}"
         )
-        if model["api_mode"] == "assistant":
+        if model["api_mode"] in ["assistant", "response"]:
             tool_for_files = st.selectbox(
                 "ファイルの用途",
                 ["file_search", "code_interpreter"]
@@ -1379,7 +1656,7 @@ with st.sidebar:
     if model["api_mode"] == "assistant":
         tools = [tool for tool in tools if tool.get("type", None) in ["function", "code_interpreter", "file_search"]]
     elif model["api_mode"] == "response":
-        tools = [tool for tool in tools if tool.get("type", None) in ["function"]
+        tools = [tool for tool in tools if tool.get("type", None) in ["function", "code_interpreter"]
 # web_search_previewは現在実装されておらず、file_searchを有効化するにはvector storeの管理機能が必要
 #        tools = [tool for tool in tools if tool.get("type", None) in ["function", "web_search_preview", "file_search"]
 # web_search_previewが使えるようになれば、これらのツールは不要になる
@@ -1418,12 +1695,19 @@ with st.sidebar:
     else:
         selected_tools = []
 
+    st.header("表示設定")
+    if model["api_mode"] == "assistant" or model["api_mode"] == "response":
+        show_code_and_logs = st.toggle(
+            "show code and logs",
+            value=False,
+            key="show_code_and_logs"
+        )
+
 if "conversation" not in st.session_state:
     st.session_state.conversation = ConversationManager(st.session_state.clients, st.session_state.assistants)
     # developerメッセージ追加
     # Formatting re-enabled: 参考 https://learn.microsoft.com/ja-jp/azure/ai-foundry/openai/how-to/reasoning?tabs=gpt-5%2Cpython-secure%2Cpy#markdown-output
-    st.session_state.conversation.add_message(model, "developer", "Formatting re-enabled - please enclose code blocks with appropriate markdown tags. ユーザーの質問が曖昧な場合は、まず簡潔に一次回答を提示し、必要に応じてより深掘りできる選択肢や、質問の意図を明確にするための追加質問を案内してください。また、ツールの利用回数が7回を超える可能性がある場合は、まず最大4回以内で合理的な回答を試み、その上でさらなるツール利用の計画をユーザーに説明し、実行の同意を確認してください。", [])
-
+    st.session_state.conversation.add_message(model, "developer", 'Formatting re-enabled - please enclose code blocks with appropriate markdown tags. ユーザーの質問が曖昧な場合は、まず簡潔に一次回答を提示し、必要に応じて、質問の意図を明確にするための質問や方向性の提案をしてください。また、ツールの利用回数がある一つの応答のためだけに7回を超える可能性がある場合は、まず最大4回以内で合理的な回答を試み、その上でさらなるツール利用の計画をユーザーに説明し、実行の同意を確認してください。code_interpreterを用いてユーザーに提供するファイルは必ずユーザー可視のツール（例：python_user_visible）で /mnt/data に直接書き出し 、同一実行で stdout にフルパスを出力しててください。', [])
 conversation = st.session_state.conversation 
 
 if content := st.chat_input("メッセージを入力"):
@@ -1482,7 +1766,7 @@ if st.session_state.get("processing"):
             }, principal)
 
             # 最終的な内容で描画しなおすべきか？当面不要と判断。
-            # placeholderを使って清書する事も考えたが、ラウザ側との同期に失敗し、前のコンテナのコンテンツが
+            # placeholderを使って清書する事も考えたが、ブラウザ側との同期に失敗し、前のコンテナのコンテンツが
             # 残ってしまい、これはうまくいかない。
             # streamlitでは既に描画したものを変更するのはやめた方がいいかも。
             # どうしても再描画が必要なら(引用番号の書き換えなど)、素直にrerun()した方がいい。
@@ -1492,3 +1776,8 @@ if st.session_state.get("processing"):
         st.error(f"処理中にエラーが発生しました")
         st.exception(e)
         st.button("リトライ")
+
+# 最終的な内容で描画しなおすべき場合は、"need_rerun" = Trueとしておけばここでrerun
+if st.session_state.need_rerun:
+    st.session_state.need_rerun = False
+    st.rerun()
