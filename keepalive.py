@@ -205,9 +205,11 @@ def login_state_extender(email):
         const m = ev.data;
         if (!m || !m.type) return;
         if (m.type === 'login-clicked') {
+          console.log('[keepalive] login-clicked');
           hideLogin('別タブでログインが開始されました。完了を待ちます');
           startShortPoll(null, '別タブでのログインがタイムアウトしました');
         } else if (m.type === 'authed') {
+          console.log('[keepalive] authed');
           hideLogin('認証済みです');
           if (m.exp) scheduleNextRefresh(m.exp);
         }
@@ -229,16 +231,7 @@ def login_state_extender(email):
 
     // 初期化: 問答無用の refresh → me で判定
     (async function init(){
-      try { await fetch(REFRESH_URL, { method:'POST', credentials:'include', cache:'no-store' }); } catch {}
-      const me = await getMe();
-      const exp = getExpiryMs(me);
-      if (isAuthed(me) && exp && (exp - Date.now() > REFRESH_EARLY_MS)) {
-        hideLogin('認証済みです');
-        scheduleNextRefresh(exp);
-      } else {
-        showLogin('再ログインが必要です');
-        startNormalPoll();
-      }
+      await refreshOnce();
     })();
 
     window.addEventListener('beforeunload', () => {
