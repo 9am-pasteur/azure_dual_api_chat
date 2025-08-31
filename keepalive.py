@@ -137,7 +137,7 @@ def login_state_extender(email):
           startNormalPoll(); return;
         }
       } catch { startNormalPoll(); return; }
-      console.log('[keepalive] refresh finished', r.status);
+      console.log('[keepalive] refresh finished');
 
       const me = await getMe();
       const exp = getExpiryMs(me);
@@ -151,12 +151,14 @@ def login_state_extender(email):
       }
     }
 
-    function startNormalPoll() {
+    async function startNormalPoll() {
       if (normalPollTimer) return;
+      const me0 = await getMe();
+      const exp0 = getExpiryMs(me0);
       normalPollTimer = setInterval(async () => {
         const me = await getMe();
         const exp = getExpiryMs(me);
-        if (isAuthed(me) && exp && (exp - Date.now() > REFRESH_EARLY_MS)) {
+        if (isAuthed(me) && exp && exp != exp0 && (exp - Date.now() > REFRESH_EARLY_MS)) {
           clearInterval(normalPollTimer); normalPollTimer = null;
           hideLogin('認証済みです');
           scheduleNextRefresh(exp);
@@ -165,9 +167,11 @@ def login_state_extender(email):
       }, NORMAL_POLL_MS);
     }
 
-    function startShortPoll(waitMsg, timeoutMsg) {
+    async function startShortPoll(waitMsg, timeoutMsg) {
       if (shortPollTimer) { clearInterval(shortPollTimer); shortPollTimer = null; }
       const start = Date.now();
+      const me0 = await getMe();
+      const exp0 = getExpiryMs(me0);
       if (waitMsg) { info.textContent = waitMsg; status.textContent = ''; }
       shortPollTimer = setInterval(async () => {
         if (Date.now() - start > LOGIN_POLL_MAX) {
@@ -178,7 +182,7 @@ def login_state_extender(email):
         }
         const me = await getMe();
         const exp = getExpiryMs(me);
-        if (isAuthed(me) && exp && (exp - Date.now() > REFRESH_EARLY_MS)) {
+        if (isAuthed(me) && exp && exp != exp0 && (exp - Date.now() > REFRESH_EARLY_MS)) {
           clearInterval(shortPollTimer); shortPollTimer = null;
           hideLogin('ログインが完了しました');
           scheduleNextRefresh(exp);
