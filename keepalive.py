@@ -76,7 +76,10 @@ def login_state_extender(email):
     }
 
     async function getMe() {
-      const r = await fetch(AUTH_ME_URL, { credentials:'include', cache:'no-store' });
+      const r = await fetch(AUTH_ME_URL, { credentials:'include', cache:'no-store' }).catch(err => {
+        console.error('[keepalive] getMe failed', err);
+        return null;
+      });
       console.log('[keepalive] getMe', r.status);
       if (!r.ok) return null;
       try {
@@ -155,7 +158,11 @@ def login_state_extender(email):
       if (normalPollTimer) return;
       const me0 = await getMe();
       const exp0 = getExpiryMs(me0);
+      let lastRun = 0;
       normalPollTimer = setInterval(async () => {
+        const now = Date.now();
+        if (now - lastRun < NORMAL_POLL_MS) return;
+        lastRun = now;
         const me = await getMe();
         const exp = getExpiryMs(me);
         if (isAuthed(me) && exp && exp != exp0 && (exp - Date.now() > REFRESH_EARLY_MS)) {
@@ -172,8 +179,12 @@ def login_state_extender(email):
       const start = Date.now();
       const me0 = await getMe();
       const exp0 = getExpiryMs(me0);
+      let lastRun = 0;
       if (waitMsg) { info.textContent = waitMsg; status.textContent = ''; }
       shortPollTimer = setInterval(async () => {
+        const now = Date.now();
+        if (now - lastRun < LOGIN_POLL_MS) return;
+        lastRun = now;
         if (Date.now() - start > LOGIN_POLL_MAX) {
           clearInterval(shortPollTimer); shortPollTimer = null;
           showLogin(timeoutMsg || 'ログインが完了しませんでした。もう一度お試しください');
@@ -221,7 +232,11 @@ def login_state_extender(email):
     }
 
     if (HEARTBEAT_MS > 0) {
+      let lastRun = 0;
       heartbeatTimer = setInterval(async () => {
+        const now = Date.now();
+        if (now - lastRun < HEARTBEAT_MS) return;
+        lastRun = now;
         if (normalPollTimer || shortPollTimer) return;
         console.log('[keepalive] heartbeat');
         const me = await getMe();
