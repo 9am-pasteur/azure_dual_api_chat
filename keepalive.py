@@ -215,6 +215,7 @@ def login_state_extender(email):
       startShortPoll(null, 'ログインが完了しませんでした。もう一度お試しください');
     });
 
+    let lastAuthed = 0;
     if (bc) {
       bc.onmessage = (ev) => {
         const m = ev.data;
@@ -224,6 +225,7 @@ def login_state_extender(email):
           hideLogin('別タブでログインが開始されました。完了を待ちます');
           startShortPoll(null, '別タブでのログインがタイムアウトしました');
         } else if (m.type === 'authed') {
+          lastAuthed = Date.now();
           console.log('[keepalive] authed');
           hideLogin('認証済みです');
           if (m.exp) scheduleNextRefresh(m.exp);
@@ -235,7 +237,7 @@ def login_state_extender(email):
       let lastRun = 0;
       heartbeatTimer = setInterval(async () => {
         const now = Date.now();
-        if (now - lastRun < HEARTBEAT_MS) return;
+        if (now - lastRun < HEARTBEAT_MS || now - lastAuthed < HEARTBEAT_MS) return;
         lastRun = now;
         if (normalPollTimer || shortPollTimer) return;
         console.log('[keepalive] heartbeat');
