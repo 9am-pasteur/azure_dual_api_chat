@@ -121,7 +121,7 @@ class HallucinatedToolCalls:
 dotenv_path = join(dirname(__file__), ".env.local")
 load_dotenv(dotenv_path)
 
-tools=[{"type": "code_interpreter"}, {"type": "file_search"}, { "type": "web_search_preview" }, customTools.time, serperTools.run, serperTools.results, serperTools.scholar, serperTools.news, serperTools.places, internetAccess.html, processPDF.pdf]
+tools=[{"type": "code_interpreter"}, {"type": "file_search"}, {"type": "web_search_preview" }, {"type": "image_generation"}, customTools.time, serperTools.run, serperTools.results, serperTools.scholar, serperTools.news, serperTools.places, internetAccess.html, processPDF.pdf]
 
 class StreamHandler(AssistantEventHandler):
     @override
@@ -569,6 +569,10 @@ def convert_parsed_response_to_assistant_messages(outputs: List[Any]) -> Tuple[L
             blocks.append(out_item)
             metadata.append({})
 
+        elif typ == "image_generation_call":
+            blocks.append(make_image_url_block("data:image/png;base64," + getattr(out_item, "result", "")))
+            metadata.append({})
+
     return blocks, metadata
 
 def pretty_print(messages: List[ChatMessage]) -> None:
@@ -906,7 +910,7 @@ def function_calling(fname, fargs):
         return fresponse
 
 # API実行モジュール
-def execute_api(model, selected_tools, conversation, options = {}):
+def execute_api(model, selected_tools, conversation, streaming_enabled, options = {}):
 
     print(model)
     thread = conversation.thread
@@ -918,7 +922,7 @@ def execute_api(model, selected_tools, conversation, options = {}):
         messages = conversation.get_completion_messages(model, text_only=True)
         print(messages)
         try:
-            if model["streaming"]:
+            if model["streaming"] and streaming_enabled:
                 response = client.complete({
                     "stream": True,
                     "messages": messages,
@@ -963,7 +967,7 @@ def execute_api(model, selected_tools, conversation, options = {}):
         if model["support_tools"]: # selected_toolsが空の場合もassistant設定を上書き
             args["tools"] = selected_tools
 
-        if model["streaming"]:
+        if model["streaming"] and streaming_enabled:
             # ストリーミング対応のAssistant API実行
             args["event_handler"] = StreamHandler(client)
             try:
@@ -1038,6 +1042,7 @@ def execute_api(model, selected_tools, conversation, options = {}):
         # ======== 2025/5/6 現時点でも、web_search_preview, image_url pointing to an internet address等が実装されていない =======
         # https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/responses?tabs=python-secure
 
+        client = st.session_state.clients["openaiv1"]
         input, response_id, file_ids_for_code_interpreter = conversation.get_response_history(model)
         try:
             args = {"model": model["model"], "input": input, "include": ["code_interpreter_call.outputs"]} | options
@@ -1060,7 +1065,7 @@ def execute_api(model, selected_tools, conversation, options = {}):
                 print(f"args: {args}")
 
                 try:
-                    if model["streaming"]:
+                    if model["streaming"] and streaming_enabled:
                         # ストリーミング対応のResponse API実行
                         with client.responses.stream(**args) as stream:
                             digester = response_streaming_digester(stream)
@@ -1145,7 +1150,7 @@ def execute_api(model, selected_tools, conversation, options = {}):
         try:
             args = {"model": model["model"], "messages": messages} | options
 
-            if model["streaming"]:
+            if model["streaming"] and streaming_enabled:
                 args["stream"] = True
                 args["stream_options"] = {"include_usage": True}
 
@@ -1159,7 +1164,7 @@ def execute_api(model, selected_tools, conversation, options = {}):
                 response = client.chat.completions.create(**args)
                 print(response)
 
-                if model["streaming"]:
+                if model["streaming"] and streaming_enabled:
                     # ストリーミング対応のCompletion API実行
                     digester = completion_streaming_digester(response)
                     full_response += st.write_stream(digester.generator)
@@ -1405,6 +1410,7 @@ if "clients" not in st.session_state:
             azure_endpoint = os.getenv("ENDPOINT_URL"),
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             api_version="2025-04-01-preview",
+            default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-1"},
             timeout=httpx.Timeout(1200.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
         # v1 preview
@@ -1413,6 +1419,7 @@ if "clients" not in st.session_state:
             base_url = os.getenv("ENDPOINT_URL").rstrip("/") + "/openai/v1/",
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             default_query={"api-version": "preview"},
+            default_headers={"x-ms-oai-image-generation-deployment": "gpt-image-1"},
             timeout=httpx.Timeout(1199.0, read=1200.0, write=30.0, connect=10.0, pool=60.0)
         ),
         "deepseek": ChatCompletionsClient(
@@ -1657,7 +1664,7 @@ with st.sidebar:
     if model["api_mode"] == "assistant":
         tools = [tool for tool in tools if tool.get("type", None) in ["function", "code_interpreter", "file_search"]]
     elif model["api_mode"] == "response":
-        tools = [tool for tool in tools if tool.get("type", None) in ["function", "code_interpreter"]
+        tools = [tool for tool in tools if tool.get("type", None) in ["function", "code_interpreter", "image_generation"]
 # web_search_previewは現在実装されておらず、file_searchを有効化するにはvector storeの管理機能が必要
 #        tools = [tool for tool in tools if tool.get("type", None) in ["function", "web_search_preview", "file_search"]
 # web_search_previewが使えるようになれば、これらのツールは不要になる
@@ -1697,6 +1704,16 @@ with st.sidebar:
         selected_tools = []
 
     st.header("表示設定")
+    if model["streaming"] and not switches["image_generation"]:
+        streaming_enabled = st.toggle(
+            "streaming mode",
+            value=True,
+            key="streaming"
+        )
+    # image_generation toolは(テキストの)streaming modeには対応していない
+    if switches["image_generation"]:
+        streaming_enabled = False
+
     if model["api_mode"] == "assistant" or model["api_mode"] == "response":
         show_code_and_logs = st.toggle(
             "show code and logs",
@@ -1755,6 +1772,7 @@ if st.session_state.get("processing"):
                 model,
                 selected_tools,
                 conversation,
+                streaming_enabled,
                 options
                 )
         
