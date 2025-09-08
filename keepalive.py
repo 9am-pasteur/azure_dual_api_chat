@@ -81,7 +81,7 @@ def login_state_extender(email):
         return null;
       });
       console.log('[keepalive] getMe', r.status);
-      if (!r.ok) return null;
+      if (!r || !r.ok) return null;
       try {
         const json = await r.json();
         console.log('[keepalive] getMe', json);
