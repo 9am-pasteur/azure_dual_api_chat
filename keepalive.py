@@ -80,8 +80,9 @@ def login_state_extender(email):
         console.error('[keepalive] getMe failed', err);
         return null;
       });
+      if (!r) return null;
       console.log('[keepalive] getMe', r.status);
-      if (!r || !r.ok) return null;
+      if (!r.ok) return null;
       try {
         const json = await r.json();
         console.log('[keepalive] getMe', json);
