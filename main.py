@@ -1704,14 +1704,14 @@ with st.sidebar:
         selected_tools = []
 
     st.header("表示設定")
-    if model["streaming"] and not switches["image_generation"]:
+    if model["streaming"] and not switches.get("image_generation", False):
         streaming_enabled = st.toggle(
             "streaming mode",
             value=True,
             key="streaming"
         )
     # image_generation toolは(テキストの)streaming modeには対応していない
-    if switches["image_generation"]:
+    if switches.get("image_generation", False):
         streaming_enabled = False
 
     if model["api_mode"] == "assistant" or model["api_mode"] == "response":
