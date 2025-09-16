@@ -8,19 +8,16 @@ on:
 permissions:
   contents: write
 
-vars:
-  UPSTREAM_REPO: 9am-pasteur/azure_dual_api_chat
-
 env:
   # 親の owner/repo を指定
-  UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO }}
+  UPSTREAM_REPO: 9am-pasteur/azure_dual_api_chat
   # 子に残したいパス（.github だけ or .github/workflows など）
   PROTECTED_PATH: .github
 
 jobs:
   sync:
     # 親リポジトリでは実行しない
-    if: ${{ github.repository != vars.UPSTREAM_REPO }}
+    if: ${{ github.repository != env.UPSTREAM_REPO }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
