@@ -17,7 +17,7 @@ env:
 jobs:
   sync:
     # 親リポジトリでは実行しない
-    if: ${{ github.repository != env.UPSTREAM_REPO }}
+    if: ${{ github.repository != '9am-pasteur/azure_dual_api_chat' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
