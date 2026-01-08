@@ -867,27 +867,27 @@ def function_calling(fname, fargs):
                 timezone=fargs.get("timezone")
             )
         elif fname == "get_google_serper":
-            st.toast(f"[Google Serper] {fargs.get("query")}", icon="🔍");
+            st.toast(f"[Google Serper] {fargs.get('query')}", icon="🔍");
             fresponse = serperTools.get_google_serper(
                 query=fargs.get("query")
             )
         elif fname == "get_google_results":
-            st.toast(f"[Google detail] {fargs.get("query")}", icon="🔍");
+            st.toast(f"[Google detail] {fargs.get('query')}", icon="🔍");
             fresponse = serperTools.get_google_results(
                 query=fargs.get("query")
             )
         elif fname == "get_google_scholar":
-            st.toast(f"[Google scholar] {fargs.get("query")}", icon="🎓");
+            st.toast(f"[Google scholar] {fargs.get('query')}", icon="🎓");
             fresponse = serperTools.get_google_scholar(
                 query=fargs.get("query")
             )
         elif fname == "get_google_news":
-            st.toast(f"[Google news] {fargs.get("query")}", icon="📰");
+            st.toast(f"[Google news] {fargs.get('query')}", icon="📰");
             fresponse = serperTools.get_google_news(
                 query=fargs.get("query")
             )
         elif fname == "get_google_places":
-            st.toast(f"[Google places] {fargs.get("query")}", icon="🍽️");
+            st.toast(f"[Google places] {fargs.get('query')}", icon="🍽️");
             fresponse = serperTools.get_google_places(
                 query=fargs.get("query"),
                 country=fargs.get("country", "jp"),
@@ -1268,8 +1268,8 @@ def format_token_summary(usage):
     if reduce(
         lambda a, c:c in usage and a,
         ["completion_tokens", "prompt_tokens", "total_tokens", "cost"], True):
-        token_summary = f"tokens in:{usage["prompt_tokens"]} out:{usage["completion_tokens"]} total:{usage["total_tokens"]}"
-        token_summary += f" cost: US${usage["cost"]}"
+        token_summary = f"tokens in:{usage['prompt_tokens']} out:{usage['completion_tokens']} total:{usage['total_tokens']}"
+        token_summary += f" cost: US${usage['cost']}"
         token_summary = f"\n:violet-background[{token_summary}]"
 
     return token_summary 
