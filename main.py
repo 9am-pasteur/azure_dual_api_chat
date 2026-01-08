@@ -658,7 +658,7 @@ def put_buttons(files, key=None) -> None:
         if file["type"] in ("file_path", "file_citation") :
             # Assistant APIでは"file_path"だけで足りた模様
             st.download_button(
-                f"{file["index"]}: {file["filename"]} : ダウンロード",
+                f"{file['index']}: {file['filename']} : ダウンロード",
                 get_file(file["file_id"]),
                 file_name=file["filename"],
                 key=key
