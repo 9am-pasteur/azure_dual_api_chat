@@ -3,7 +3,7 @@ updates:
   - package-ecosystem: "pip"
     directory: "/"              # requirements.txt のあるディレクトリ
     schedule:
-      interval: "daily"         # daily/weekly/monthly
+      interval: "weekly"         # daily/weekly/monthly
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
